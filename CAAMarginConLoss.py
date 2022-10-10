@@ -19,6 +19,7 @@ class SupConLoss(nn.Module):
         self.th = math.cos(math.pi - self.m)
         self.mm = math.sin(math.pi - self.m) * self.m
         self.weight = torch.nn.Parameter(torch.FloatTensor(192, 1251), requires_grad=True)
+        nn.init.xavier_normal_(self.weight, gain=1)
         
     def forward(self, features, labels=None, mask=None):
         """
