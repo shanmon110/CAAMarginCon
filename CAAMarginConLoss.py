@@ -1,10 +1,18 @@
+"""
+Author: Yonglong Tian (yonglong@mit.edu)
+Date: May 07, 2020
+"""
 from __future__ import print_function
+
 import torch, math
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+
 class SupConLoss(nn.Module):
+    """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
+    It also supports the unsupervised contrastive loss in SimCLR"""
 
     def __init__(self, temperature=0.07, contrast_mode='all',
                  base_temperature=0.07):
@@ -12,17 +20,23 @@ class SupConLoss(nn.Module):
         self.temperature = temperature
         self.contrast_mode = contrast_mode
         self.base_temperature = base_temperature
-        self.m = 10
-        self.s = 34
+        self.m = 0.2
+        self.s = 10
         self.cos_m = math.cos(self.m)
         self.sin_m = math.sin(self.m)
         self.th = math.cos(math.pi - self.m)
         self.mm = math.sin(math.pi - self.m) * self.m
-        self.weight = torch.nn.Parameter(torch.FloatTensor(192, 1251), requires_grad=True)
-        nn.init.xavier_normal_(self.weight, gain=1)
-        
+        self.weight = torch.nn.Parameter(torch.FloatTensor(2793, 2793), requires_grad=False)
+        self.v = torch.nn.Parameter(torch.FloatTensor(2793, 2793), requires_grad=True)
+        self.fc = nn.Linear(192, 2793)
+        self.ce = nn.CrossEntropyLoss()
+        self.softmax = nn.Softmax(dim=1)
+
     def forward(self, features, labels=None, mask=None):
-        """
+        """Compute loss for model. If both `labels` and `mask` are None,
+        it degenerates to SimCLR unsupervised loss:
+        https://arxiv.org/pdf/2002.05709.pdf
+
         Args:
             features: hidden vector of shape [bsz, n_views, ...].
             labels: ground truth of shape [bsz].
@@ -74,35 +88,54 @@ class SupConLoss(nn.Module):
         x = torch.div(contrast_feature, x_norm)
         w_norm = torch.norm(anchor_feature, p=2, dim=1, keepdim=True).clamp(min=1e-12)
         w = torch.div(anchor_feature, w_norm)
-        cosine = torch.mm(x, w.T)
+        cosine = torch.matmul(x, w.T)
         cosine = F.normalize(cosine, p=2, dim=1)
         sine = torch.sqrt((1.0 - torch.mul(cosine, cosine)).clamp(0, 1))
         phi = cosine * self.cos_m - sine * self.sin_m
         phi = torch.where((cosine - self.th) > 0, phi, cosine - self.mm)
-        similarity = x_norm * w_norm.T * (phi+cosine)
+        output = self.s * phi
+        output = output.double()
+#        output = F.normalize(output, p=2, dim=1)
+        
+        similarity = x_norm * w_norm.T * (phi + cosine)
+        similarity2 = torch.matmul(anchor_feature, contrast_feature.T)
+               
+        attlabels = torch.cat((labels, labels), dim=0)
 
-        #embd is the weights of the FC layer for classification R^(dxC)
-        embd = F.normalize(self.weight, p=2, dim=0) # normalize the embedding
-        denominator = torch.exp(torch.mm(contrast_feature, embd))
-        attlabels = torch.cat((labels,labels),dim=0)    
-        A = [] #attention corresponding to each feature fector
+        # embd is the weights of the FC layer for classification R^(dxC)
+        embd = F.normalize(self.weight, p=2, dim=0)  # normalize the embedding
+        h1 = self.fc(contrast_feature)
+        h2 = torch.tanh(h1)
+        one_hot = torch.zeros_like(embd)
+        one_hot.scatter_(1, attlabels.view(-1, 1), 1)
+#        temp = torch.matmul(h2, one_hot)        
+        denominator = torch.exp(torch.mm(h2, one_hot)) 
+
+        A = []  # attention corresponding to each feature fector
         n = contrast_feature.shape[0]
         for i in range(n):
             a_i = denominator[i][attlabels[i]] / torch.sum(denominator[i])
             A.append(a_i)
-        # a_i's
+            # a_i's
         atten_class = torch.stack(A)
-        #a_ij's
-        A = torch.min(atten_class.expand(n,n) , atten_class.view(-1,1).expand(n,n) ) # pairwise minimum of attention weights
-       
+        atten_class = F.normalize(atten_class, p=2, dim=1)
+       # atten_class = data_normal(atten_class)
+
+        #        #a_ij's
+        A = torch.min(atten_class.expand(n, n),
+                      atten_class.view(-1, 1).expand(n, n))  # pairwise minimum of attention weights
+
         # compute logits
+        
         anchor_dot_contrast = torch.div(
-            similarity,
+            output,
             self.temperature)
         # for numerical stability
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
 
         logits = anchor_dot_contrast - logits_max.detach()
+
+        logits = logits * A
 
         # tile mask
         mask = mask.repeat(anchor_count, contrast_count)
@@ -114,16 +147,16 @@ class SupConLoss(nn.Module):
 
         # compute log_prob
 
-        exp_logits =  (torch.exp(logits * A)) * logits_mask
+        exp_logits = (torch.exp(logits)) * logits_mask
 
-        log_prob = logits * A - torch.log(exp_logits.sum(1, keepdim=True))
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
 
         # compute mean of log-likelihood over positive
-        #        mean_log_prob_pos = - self.weight_fn(log_prob,mask) * (mask * log_prob).sum(1) / mask.sum(1)
+
         mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
 
         # loss
-        loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
+        loss = -(self.temperature / self.base_temperature) * mean_log_prob_pos
 
         loss = loss.view(anchor_count, batch_size).mean()
 
