@@ -1,6 +1,6 @@
 """
-Author: Yonglong Tian (yonglong@mit.edu)
-Date: May 07, 2020
+Author: LI Zhe (lizhe.li@connect.polyu.hk)
+Date: Oct 07, 2022
 """
 from __future__ import print_function
 
@@ -11,8 +11,6 @@ import numpy as np
 
 
 class SupConLoss(nn.Module):
-    """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
-    It also supports the unsupervised contrastive loss in SimCLR"""
 
     def __init__(self, temperature=0.07, contrast_mode='all',
                  base_temperature=0.07):
@@ -33,9 +31,7 @@ class SupConLoss(nn.Module):
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, features, labels=None, mask=None):
-        """Compute loss for model. If both `labels` and `mask` are None,
-        it degenerates to SimCLR unsupervised loss:
-        https://arxiv.org/pdf/2002.05709.pdf
+        """
 
         Args:
             features: hidden vector of shape [bsz, n_views, ...].
